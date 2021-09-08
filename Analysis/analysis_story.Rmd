@@ -39,16 +39,12 @@ dirs$output <- "../Output/"
 
 # Data Loading
 # Covid data
-df_covid <- read_csv(file.path(dirs$raw, 
-                               "COVID/covid19_county_metrics.csv")) %>% 
-  clean_names()
 shp_covid <- st_read(file.path(dirs$raw, 
                                "COVID",
                                "Colorado_COVID-19_Positive_Cases_and_Rates_of_Infection_by_County_of_Identification.shp"))
 
 # State GDP data
-df_ind <- read_csv(file.path(dirs$raw, "CONGSP.csv"),
-                   skip = 1) %>% 
+df_ind <- read_csv(file.path(dirs$raw, "CONGSP.csv")) %>% 
   clean_names() %>% 
   mutate(year = as.character(year(dmy(date))))
 
