@@ -1,0 +1,342 @@
+---
+title: "Covid Impact Analysis"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    storyboard: true
+knit: (function(inputFile, encoding) {
+      reports <- "../Output/HTML/";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_file=file.path(reports,
+                        "analysis_story.html")) })
+---
+
+```{r setup, include=FALSE}
+# Libraries
+library(sf)
+library(raster)
+library(rgeos)
+library(dplyr)
+library(stringr)
+library(forcats)
+library(readr)
+library(readxl)
+library(plotly)
+library(ggplot2)
+library(rasterVis)
+library(leaflet)
+library(janitor)
+library(lubridate)
+library(flexdashboard)
+
+# Directories
+dirs = list()
+dirs$raw <- "../Input/Raw_data/"
+dirs$processed <- "../Input/Processed_data/"
+dirs$output <- "../Output/"
+
+# Data Loading
+# Covid data
+df_covid <- read_csv(file.path(dirs$raw, 
+                               "COVID/covid19_county_metrics.csv")) %>% 
+  clean_names()
+shp_covid <- st_read(file.path(dirs$raw, 
+                               "COVID",
+                               "Colorado_COVID-19_Positive_Cases_and_Rates_of_Infection_by_County_of_Identification.shp"))
+
+# State GDP data
+df_ind <- read_csv(file.path(dirs$raw, "CONGSP.csv"),
+                   skip = 1) %>% 
+  clean_names() %>% 
+  mutate(year = as.character(year(dmy(date))))
+
+# Virginia 2019 Traffic data
+virg_19 <- read_xls(file.path(dirs$raw, 
+                              "Highways_Traffic_Counts",
+                              "AADT_PrimaryInterstate_2019.xls"),
+                    skip = 6) %>% 
+  transmute(link_id = `Link ID`,
+            route_num = `Route Number`,
+            route_label = `Route Label`,
+            start_label = `Start Label`,                              
+            end_label = `End Label`,
+            aadt_19 = AADT...14) %>% 
+  distinct()
+
+# Virginia 2020 Traffic data
+virg_20 <- read_xlsx(file.path(dirs$raw, 
+                              "Highways_Traffic_Counts",
+                              "AADT_PrimaryInterstate_2020.xlsx"),
+                     skip = 6) %>% 
+  transmute(link_id = `Link ID`,
+            route_num = `Route Number`,
+            route_label = `Route Label`,
+            start_label = `Start Label`,                              
+            end_label = `End Label`,
+            aadt_20 = AADT...14) %>% 
+  distinct()
+
+
+# Colorado 2019 Traffic data
+col_19 <- read_xlsx(file.path(dirs$raw, 
+                              "Highways_Traffic_Counts",
+                              "CDOT_Traffic2019.xlsx")) %>% 
+  clean_names() %>% 
+  rename(aadt_19 = aadt)
+
+# Change detected data
+veg_raster <- raster(file.path(dirs$output, "/Images/Change_detection.tif"))
+
+class_area <- st_read(file.path(dirs$processed,
+                                "Change_detection_area.shp")) %>% 
+  as.data.frame() %>% 
+  clean_names()  %>% 
+  group_by(class) %>% 
+  summarise(area = sum(area, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(class = c("NonVeg-Veg", "Unclassified", "Veg-NonVeg", "No Change"))
+
+
+```
+
+Covid Stats
+================================
+
+Column {data-width=650}
+----------------------------------------------------------------
+
+### Covid-19 in Colorado State
+
+```{r}
+
+covid_pal_val <- shp_covid$County_Pos
+covid_pal_fun <- colorNumeric("Spectral", 
+                              reverse = TRUE,
+                              na.color = NA,
+                              domain = covid_pal_val)
+
+shp_covid %>% 
+  leaflet() %>% 
+  addProviderTiles(provider = "Esri.WorldStreetMap") %>% 
+  addPolygons(color = covid_pal_fun(covid_pal_val),
+              weight = 2,
+              opacity = 0.7,
+              label = ~paste0(LABEL, " - ", County_Pos),
+              popup = ~paste(
+                "County :", LABEL, "<br/>",
+                "Positive Cases :", County_Pos, "<br/>",
+                "Total County Population :", County_Pop, "<br/>",
+                "Positiviyt Rate :", County_Rat),
+              group = "Colorado County Covid Cases"
+              ) %>% 
+  addLegend(pal = covid_pal_fun,
+            values = covid_pal_val,
+            opacity = 0.75,
+            title = "Colorado County Covid Cases",
+            position = "topright")
+
+
+```
+
+Column {data-width=350 data-height=350}
+-----------------------------------------------------------------------
+
+### Worst Affected Counties
+
+```{r}
+shp_covid %>% 
+  as.data.frame() %>% 
+  top_n(10,County_Pos) %>% 
+  clean_names() %>%
+  arrange(desc(county_pos)) %>% 
+  plot_ly(
+    y = ~reorder(label, county_pos),
+    x = ~county_pos) %>% 
+  add_bars() %>% 
+  layout(xaxis = list(title = "Covid Positive Counts"),
+         yaxis = list(title = "County"))
+
+
+```
+
+### Overview of Covid-19 in Colorado State 
+***
+While most of the Counties in Colorado have less than 20000 Covid cases till date since its beginning on March 2020, El Paso, Denver, Araphoe, Adams and Jefferson are the top five Counties which also surpasses 50000 cases till date. Among them El Paso is the worst hit with `r max(shp_covid$County_Pos, na.rm = T)` positive cases and we are going to perform the impact of Covid on the environment by analyzing a small land strip from El Paso County.
+
+Economic Activities
+=====================================
+
+Column {data-width=650}
+-----------------------------------------------------
+
+### State GDP Trend of Colorado
+
+```{r}
+
+ind_plot <- df_ind %>% 
+  plot_ly(x = ~year, 
+          y = ~congsp, 
+          type = 'scatter', 
+          mode = 'lines',
+          name = "GDP Trend") %>% 
+  layout(xaxis = list(title = "Year", tickangle = 40),
+         yaxis = list(title = "Colorado State GDP"))#,
+         # title = "State GDP Trend of Colorado")
+
+rec_years <- df_ind$year[!is.na(df_ind$remark)]
+
+for(i in 1:length(rec_years))
+{
+  ind_plot <- ind_plot %>%
+    add_trace(x = rec_years[i], 
+              type = 'scatter', 
+              mode = 'lines',
+              line = list(color = "red", 
+                          dash = "dash"), 
+              name = paste("Recession -", rec_years[i]),
+              text = "Recession Years")
+}
+
+ind_plot
+
+```
+
+Column {data-width=350 data-height=300}
+----------------------------------------------
+
+### Mean AADT Difference
+
+```{r}
+traffic_stats <- virg_19 %>% 
+  inner_join(virg_20) %>% 
+  mutate(difference = aadt_20 - aadt_19) %>% 
+  summarise(mean_diff = mean(difference, na.rm = T),
+            std_dev = sd(difference, na.rm = T),
+            median = median(difference, na.rm = T))
+
+mean_difference <- as.integer(traffic_stats %>% pull(mean_diff))
+sd_difference <- as.integer(traffic_stats %>% pull(std_dev))
+median_difference <- as.integer(traffic_stats %>% pull(median))
+
+valueBox(mean_difference,
+         caption = "Mean AADT Difference",
+         icon = "fa-calculator")
+
+```
+
+### Median AADT Difference
+
+```{r}
+valueBox(median_difference,
+         caption = "Median AADT Difference",
+         icon = "fa-poll")
+```
+
+### Activity Analysis
+
+***
+It's evident that the State's Gross Domestic Production which indicates the Industrial/Commercial activity of a state, got severely affected during 2020 by breaking the annual trend as shown. Also by analyzing another similar State's Traffic data by taking the difference between Annual Average Daily Traffic(AADT) of 2019 and 2020, there is a significant reduction in the Road Transport sector too. Like many other States, Colorado too doesn't have 2020 AADT data which is why we are considering another State's available data, assuming the trend to be same. The negative mean value indicates the 2020 traffic is less than the 2019 traffic with a standard deviation of `r sd_difference` and a median of `r median_difference`, which implies the distribution of the difference values is left skewed and left centered.
+
+Vegetation Change
+============================================
+
+Column {data-width=650 .tabset}
+---------------------------------------------------------------
+
+### Land Cover Geography
+
+```{r}
+rast_pal <- colorFactor(c('green', "black", 'red', 'blue'), 
+                        as.factor(values(veg_raster)),
+                        na.color = "transparent")
+rast_class <- c("NonVeg-Veg", "Unclassified", "Veg-NonVeg", "No Change")
+covid_pal_val <- shp_covid$County_Pos
+covid_pal_fun <- colorNumeric("Spectral", 
+                              reverse = TRUE,
+                              na.color = NA,
+                              domain = covid_pal_val)
+
+shp_covid %>% 
+  leaflet() %>% 
+  addProviderTiles(provider = "Esri.WorldStreetMap") %>% 
+  setView(zoom = 8,lng = -104.75, lat = 38.81) %>% 
+  addPolygons(color = covid_pal_fun(covid_pal_val),
+              weight = 2,
+              opacity = 0.7,
+              label = ~paste0(LABEL, " - ", County_Pos),
+              popup = ~paste(
+                "County :", LABEL, "<br/>",
+                "Positive Cases :", County_Pos, "<br/>",
+                "Total County Population :", County_Pop, "<br/>",
+                "Positiviyt Rate :", County_Rat),
+              group = "Colorado County Covid Cases"
+              ) %>% 
+  addRasterImage(veg_raster, 
+                 colors = rast_pal, 
+                 opacity = 0.8) %>%
+  addLegend(pal = rast_pal, 
+            values = values(veg_raster),
+    title = "Change Detection") %>% 
+  addLegend(pal = covid_pal_fun,
+            values = covid_pal_val,
+            opacity = 0.75,
+            title = "Colorado County Covid Cases",
+            position = "bottomleft")  
+
+
+
+```
+
+
+### Change Detection
+
+```{r}
+
+grast <- gplot(veg_raster, maxpixels = 5e5) + 
+  geom_tile(aes(fill = as.factor(value))) +
+  scale_fill_manual(labels = c("NonVeg-Veg", "Unclassified", "Veg-NonVeg", "No Change"),
+                    values = c('green', "black", 'red', 'blue'))  
+
+grast
+# ggplotly(grast)
+
+```
+
+
+Column {data-width=350}
+-----------------------------------------------------
+
+### Change Class Area 
+
+```{r}
+class_area %>% 
+  plot_ly(
+    y = ~reorder(class, area),
+    x = ~area) %>% 
+  add_bars() %>% 
+  layout(xaxis = list(title = "Area in Sq.Units"),
+         yaxis = list(title = "Land Cover Change Class"))
+
+
+```
+
+### Land Use Land Cover Change Analysis
+
+*** 
+From the raster representation of the land cover change detection (from the second tab) and the area under each change class, it's clear that the environmental change due to Covid is significantly positive with an order of magnitude of one when compares to the land degradation during the same time.
+The reduced Industrial activities, traffic and other allied human interactions due to the government imposed lockdown during the pandemic cause this positive impact in the environment.
+
+We had done analysis only with Land Use and Land Cover impacts with Covid. Other significant factors like Fire Incidents, Atmospheric Temperature and Quality, Water Quality, etc. can also be analyzed in the same manner with pre and post pandemic to discover interesting facts about the environmental changes during the pandemic, though it causes sorrows and miseries to mankind, which we all are still struggling to recover.
+
+
+
+
+
+
+
+
+
+
+
